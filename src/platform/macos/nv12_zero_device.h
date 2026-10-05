@@ -50,7 +50,9 @@ namespace platf {
    * @brief macOS encode device that forwards AVFoundation frames to FFmpeg's VideoToolbox encoder.
    *
    * 10-bit frames are captured as P010 and forwarded zero-copy. 8-bit frames are captured as BGRA
-   * and converted to NV12 with chroma filtering (see convert_bgra_to_nv12()).
+   * and converted to NV12 with chroma filtering (see convert_bgra_to_nv12()). Frames that don't
+   * match the session's size or format (another concurrent session configured the shared capture)
+   * are forwarded unchanged.
    */
   class nv12_zero_device: public avcodec_encode_device_t {
     // display holds a pointer to an av_video object. Since the namespaces of AVFoundation
@@ -110,6 +112,7 @@ namespace platf {
     CVPixelBufferPoolRef nv12_pool {};  ///< Destination buffers for converted frames, sized to the encoder frame.
     vImage_ARGBToYpCbCr ypcbcr_info {};  ///< Conversion matching the negotiated colorspace.
     bool ypcbcr_info_ready {false};  ///< Whether ypcbcr_info has been generated.
+    bool warned_unconvertible {false};  ///< Whether the unconvertible-frame warning was logged.
   };
 
 }  // namespace platf

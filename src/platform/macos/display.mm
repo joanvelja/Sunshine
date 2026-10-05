@@ -147,7 +147,8 @@ namespace platf {
             state->stopped = stop = true;
           }
         }
-        // Outside the lock: stopping waits for any in-flight frame callback, which takes the lock.
+        // Outside the lock, so a frame callback blocked on it can finish (it sees `stopped` and
+        // returns without touching the pipeline callbacks).
         if (stop) {
           [av_capture stopCaptureWithSignal:signal];
         }

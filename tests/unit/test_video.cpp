@@ -438,3 +438,18 @@ TEST(IdrRequestTrackerTest, NoRequestNeverReportsAMiss) {
   EXPECT_FALSE(tracker.missed_idr(3, false));
   EXPECT_FALSE(tracker.missed_idr(4, true));
 }
+
+TEST(IdrRequestTrackerTest, KeyframeForEarlierFrameDoesNotSatisfyRequest) {
+  // Encoders with periodic keyframes can emit one for a frame before the request.
+  video::idr_request_tracker_t tracker;
+  tracker.requested(10);
+  EXPECT_FALSE(tracker.missed_idr(8, true));
+  EXPECT_TRUE(tracker.missed_idr(10, false));
+}
+
+TEST(IdrRequestTrackerTest, LaterRequestDoesNotHideMissOnEarlierOne) {
+  video::idr_request_tracker_t tracker;
+  tracker.requested(10);
+  tracker.requested(12);
+  EXPECT_TRUE(tracker.missed_idr(10, false));
+}

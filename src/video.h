@@ -722,7 +722,10 @@ namespace video {
      * @param pts Presentation timestamp of the requesting frame.
      */
     void requested(int64_t pts) {
-      pending_pts = pts;
+      // Keep the earliest outstanding request: a later one doesn't excuse a miss on the earlier.
+      if (!pending_pts) {
+        pending_pts = pts;
+      }
     }
 
     /**
@@ -733,18 +736,12 @@ namespace video {
      * @return True when the requested frame was encoded without a keyframe.
      */
     bool missed_idr(int64_t pts, bool keyframe) {
-      if (!pending_pts) {
-        return false;
+      if (!pending_pts || pts < *pending_pts) {
+        return false;  // no request, or a packet of an earlier frame still leaving the encoder
       }
-      if (keyframe) {
-        pending_pts.reset();
-        return false;
-      }
-      if (pts >= *pending_pts) {
-        pending_pts.reset();
-        return true;
-      }
-      return false;  // packet of an earlier frame still leaving the encoder
+      // A keyframe for an earlier frame (e.g. a periodic GOP keyframe) doesn't satisfy the request.
+      pending_pts.reset();
+      return !keyframe;
     }
   };
 

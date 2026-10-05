@@ -84,7 +84,11 @@
     dispatch_semaphore_t signal = dispatch_semaphore_create(0);
 
     [self.videoOutputs setObject:videoOutput forKey:videoConnection];
-    [self.captureCallbacks setObject:frameCallback forKey:videoConnection];
+    // Under manual reference counting the caller's block literal lives on its stack, and
+    // retaining it is a no-op. Store a heap copy so it can outlive the caller's frame.
+    FrameCallbackBlock heapCallback = [frameCallback copy];
+    [self.captureCallbacks setObject:heapCallback forKey:videoConnection];
+    [heapCallback release];
     [self.captureSignals setObject:signal forKey:videoConnection];
 
     [self.session startRunning];
@@ -129,7 +133,12 @@
 - (void)captureOutput:(AVCaptureOutput *)captureOutput
   didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          fromConnection:(AVCaptureConnection *)connection {
-  FrameCallbackBlock callback = [self.captureCallbacks objectForKey:connection];
+  // stopCaptureWithSignal: may remove the callback from another thread at any time, so read it
+  // under the lock and hold a reference for the duration of the call.
+  FrameCallbackBlock callback;
+  @synchronized(self) {
+    callback = [[self.captureCallbacks objectForKey:connection] retain];
+  }
 
   if (callback != nil) {
     if (!callback(sampleBuffer)) {
@@ -137,6 +146,7 @@
         [self stopCaptureForConnection:connection];
       }
     }
+    [callback release];
   }
 }
 

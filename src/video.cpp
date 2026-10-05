@@ -478,6 +478,7 @@ namespace video {
       vps = std::move(other.vps);
 
       inject = other.inject;
+      idr_request = other.idr_request;
 
       return *this;
     }
@@ -1859,7 +1860,7 @@ namespace video {
       }
 
       if (av_packet->flags & AV_PKT_FLAG_KEY) {
-        BOOST_LOG(debug) << "Frame "sv << frame_nr << ": IDR Keyframe (AV_FRAME_FLAG_KEY)"sv;
+        BOOST_LOG(debug) << "Frame "sv << av_packet->pts << ": IDR Keyframe (AV_FRAME_FLAG_KEY)"sv;
       }
 
       if (av_packet->pts != AV_NOPTS_VALUE && session.idr_request.missed_idr(av_packet->pts, av_packet->flags & AV_PKT_FLAG_KEY)) {

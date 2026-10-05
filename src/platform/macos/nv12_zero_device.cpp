@@ -81,8 +81,7 @@ namespace platf {
 
   int convert_bgra_to_nv12(CVPixelBufferRef bgra, CVPixelBufferRef nv12, const vImage_ARGBToYpCbCr &info) {
     const auto nv12_format {CVPixelBufferGetPixelFormatType(nv12)};
-    if (CVPixelBufferGetPixelFormatType(bgra) != kCVPixelFormatType_32BGRA ||
-        (nv12_format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange && nv12_format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)) {
+    if (CVPixelBufferGetPixelFormatType(bgra) != kCVPixelFormatType_32BGRA || (nv12_format != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange && nv12_format != kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)) {
       BOOST_LOG(error) << "BGRA to NV12: unexpected pixel formats"sv;
       return -1;
     }
@@ -135,7 +134,19 @@ namespace platf {
     auto *av_img = (av_img_t *) &img;
     CVPixelBufferRef pixel_buffer {av_img->pixel_buffer->buf};
 
-    if (convert_bgra) {
+    // All sessions share one capture output, configured by whichever session started it. A
+    // session with a different resolution or bit depth gets frames it can't convert; hand those
+    // to VideoToolbox unchanged, which converts (and decimates chroma) as it did before.
+    const bool convertible {
+      CVPixelBufferGetPixelFormatType(pixel_buffer) == kCVPixelFormatType_32BGRA &&
+      (int) CVPixelBufferGetWidth(pixel_buffer) == frame->width && (int) CVPixelBufferGetHeight(pixel_buffer) == frame->height
+    };
+    if (convert_bgra && !convertible && !warned_unconvertible) {
+      BOOST_LOG(warning) << "Captured frames don't match this session's format; encoding them without chroma filtering"sv;
+      warned_unconvertible = true;
+    }
+
+    if (convert_bgra && convertible) {
       if (!ypcbcr_info_ready || !nv12_pool) {
         BOOST_LOG(error) << "BGRA to NV12 conversion is not initialized"sv;
         return -1;
