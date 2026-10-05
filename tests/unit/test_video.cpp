@@ -409,3 +409,32 @@ TEST(SoftwareEncoderConversion, Bgr0AndNv12) {
   fallback_nv12_img.row_pitch = w;
   EXPECT_EQ(device.convert(fallback_nv12_img), 0);
 }
+
+TEST(IdrRequestTrackerTest, KeyframeArrivingAfterEarlierPacketsIsNotAMiss) {
+  // An encoder with two frames of latency returns the packets of frames 8 and 9 first.
+  video::idr_request_tracker_t tracker;
+  tracker.requested(10);
+  EXPECT_FALSE(tracker.missed_idr(8, false));
+  EXPECT_FALSE(tracker.missed_idr(9, false));
+  EXPECT_FALSE(tracker.missed_idr(10, true));
+  EXPECT_FALSE(tracker.pending_pts.has_value());
+}
+
+TEST(IdrRequestTrackerTest, RequestedFrameWithoutKeyframeIsAMiss) {
+  video::idr_request_tracker_t tracker;
+  tracker.requested(10);
+  EXPECT_TRUE(tracker.missed_idr(10, false));
+  EXPECT_FALSE(tracker.missed_idr(11, false));  // reported once
+}
+
+TEST(IdrRequestTrackerTest, LaterNonKeyPacketWithoutKeyframeIsAMiss) {
+  video::idr_request_tracker_t tracker;
+  tracker.requested(10);
+  EXPECT_TRUE(tracker.missed_idr(12, false));
+}
+
+TEST(IdrRequestTrackerTest, NoRequestNeverReportsAMiss) {
+  video::idr_request_tracker_t tracker;
+  EXPECT_FALSE(tracker.missed_idr(3, false));
+  EXPECT_FALSE(tracker.missed_idr(4, true));
+}

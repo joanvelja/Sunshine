@@ -6,6 +6,7 @@
 
 // standard includes
 #include <chrono>
+#include <optional>
 #include <string_view>
 
 // local includes
@@ -704,6 +705,48 @@ namespace video {
     config_t config,
     void *channel_data
   );
+
+  /**
+   * @brief Tracks an outstanding IDR request by frame PTS.
+   *
+   * Encoders with pipeline latency return packets for earlier frames before the packet of
+   * the frame that requested an IDR, so the requested frame must be matched by PTS rather
+   * than by comparing the input frame's flags with whichever packet comes out next.
+   */
+  struct idr_request_tracker_t {
+    std::optional<int64_t> pending_pts;  ///< PTS of the frame that requested an IDR, until resolved.
+
+    /**
+     * @brief Record that the frame with this PTS was sent with an IDR request.
+     *
+     * @param pts Presentation timestamp of the requesting frame.
+     */
+    void requested(int64_t pts) {
+      pending_pts = pts;
+    }
+
+    /**
+     * @brief Update the tracker with an encoded packet.
+     *
+     * @param pts Presentation timestamp of the packet.
+     * @param keyframe Whether the packet is a keyframe.
+     * @return True when the requested frame was encoded without a keyframe.
+     */
+    bool missed_idr(int64_t pts, bool keyframe) {
+      if (!pending_pts) {
+        return false;
+      }
+      if (keyframe) {
+        pending_pts.reset();
+        return false;
+      }
+      if (pts >= *pending_pts) {
+        pending_pts.reset();
+        return true;
+      }
+      return false;  // packet of an earlier frame still leaving the encoder
+    }
+  };
 
   /**
    * @brief Validate encoder before it is used.

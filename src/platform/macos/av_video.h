@@ -88,4 +88,15 @@ typedef bool (^FrameCallbackBlock)(CMSampleBufferRef);
  */
 - (dispatch_semaphore_t)capture:(FrameCallbackBlock)frameCallback;
 
+/**
+ * @brief Stop the capture started by capture: and signal its semaphore.
+ *
+ * Lets the caller end a capture without waiting for another frame, which AVFoundation
+ * does not deliver while the screen is static. Safe to call after the capture already
+ * stopped itself because its callback returned NO.
+ *
+ * @param signal Semaphore returned by capture:.
+ */
+- (void)stopCaptureWithSignal:(dispatch_semaphore_t)signal;
+
 @end
