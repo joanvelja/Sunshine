@@ -9,6 +9,7 @@
 // standard includes
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -131,12 +132,55 @@ TEST_F(ClientAuthorizationTest, MultipleClientsPersistAndUnpairIndependently) {
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(expired_credentials.x509));
 }
 
+namespace {
+  /**
+   * @brief Write a state file that lists the same certificate twice, as older versions did on re-pair.
+   *
+   * @param cert Certificate PEM to list twice.
+   */
+  void write_duplicate_state(const std::string &cert) {
+    nlohmann::json device = {{"name", "first"}, {"cert", cert}, {"uuid", "11111111-1111-1111-1111-111111111111"}, {"enabled", "true"}};
+    nlohmann::json second = device;
+    second["name"] = "second";
+    second["uuid"] = "22222222-2222-2222-2222-222222222222";
+    const nlohmann::json state = {{"root", {{"uniqueid", "00000000-0000-0000-0000-000000000000"}, {"named_devices", {device, second}}}}};
+    std::ofstream(config::nvhttp.file_state) << state.dump(2);
+  }
+}  // namespace
+
 TEST_F(ClientAuthorizationTest, DuplicateCertificateIdentityFailsClosed) {
   const auto credentials = test_utils::certificates::generate_ca_credentials();
-  ASSERT_FALSE(nvhttp::test_support::add_client("first", credentials.x509, true).empty());
-  ASSERT_FALSE(nvhttp::test_support::add_client("second", credentials.x509, true).empty());
+  write_duplicate_state(credentials.x509);
+  nvhttp::test_support::reload_client_state();
 
   EXPECT_FALSE(nvhttp::test_support::authorize_client_certificate(credentials.x509));
+}
+
+TEST_F(ClientAuthorizationTest, RepairingSameCertificateUpdatesExistingEntry) {
+  const auto credentials = test_utils::certificates::generate_ca_credentials();
+  const auto first_uuid = nvhttp::test_support::add_client("first", credentials.x509, false);
+  const auto second_uuid = nvhttp::test_support::add_client("second", credentials.x509, true);
+
+  EXPECT_EQ(second_uuid, first_uuid);
+  ASSERT_EQ(nvhttp::get_all_clients().size(), 1);
+  EXPECT_EQ(nvhttp::get_all_clients()[0]["name"], "second");
+  // Pairing again re-enables a disabled client: it required the PIN.
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(credentials.x509));
+}
+
+TEST_F(ClientAuthorizationTest, RepairingCollapsesDuplicatesFromOlderVersions) {
+  const auto credentials = test_utils::certificates::generate_ca_credentials();
+  write_duplicate_state(credentials.x509);
+  nvhttp::test_support::reload_client_state();
+  ASSERT_FALSE(nvhttp::test_support::authorize_client_certificate(credentials.x509));
+
+  ASSERT_FALSE(nvhttp::test_support::add_client("repaired", credentials.x509, true).empty());
+  EXPECT_EQ(nvhttp::get_all_clients().size(), 1);
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(credentials.x509));
+
+  nvhttp::test_support::reset_client_state();
+  nvhttp::test_support::reload_client_state();
+  EXPECT_TRUE(nvhttp::test_support::authorize_client_certificate(credentials.x509));
 }
 
 TEST_F(ClientAuthorizationTest, ConcurrentStateChangesRemainConsistent) {

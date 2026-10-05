@@ -84,7 +84,11 @@
     dispatch_semaphore_t signal = dispatch_semaphore_create(0);
 
     [self.videoOutputs setObject:videoOutput forKey:videoConnection];
-    [self.captureCallbacks setObject:frameCallback forKey:videoConnection];
+    // Under manual reference counting the caller's block literal lives on its stack, and
+    // retaining it is a no-op. Store a heap copy so it can outlive the caller's frame.
+    FrameCallbackBlock heapCallback = [frameCallback copy];
+    [self.captureCallbacks setObject:heapCallback forKey:videoConnection];
+    [heapCallback release];
     [self.captureSignals setObject:signal forKey:videoConnection];
 
     [self.session startRunning];
@@ -93,23 +97,56 @@
   }
 }
 
+/**
+ * @brief Tear down one capture output and signal its semaphore.
+ *
+ * Must be called while synchronized on self. No-op if the capture was already stopped.
+ *
+ * @param connection Connection of the capture output to stop.
+ */
+- (void)stopCaptureForConnection:(AVCaptureConnection *)connection {
+  dispatch_semaphore_t signal = [self.captureSignals objectForKey:connection];
+  if (signal == nil) {
+    return;
+  }
+
+  [self.session stopRunning];
+  [self.captureCallbacks removeObjectForKey:connection];
+  [self.session removeOutput:[self.videoOutputs objectForKey:connection]];
+  [self.videoOutputs removeObjectForKey:connection];
+  dispatch_semaphore_signal(signal);
+  [self.captureSignals removeObjectForKey:connection];
+  [self.session startRunning];
+}
+
+- (void)stopCaptureWithSignal:(dispatch_semaphore_t)signal {
+  @synchronized(self) {
+    for (AVCaptureConnection *connection in [[self.captureSignals keyEnumerator] allObjects]) {
+      if ([self.captureSignals objectForKey:connection] == signal) {
+        [self stopCaptureForConnection:connection];
+        return;
+      }
+    }
+  }
+}
+
 - (void)captureOutput:(AVCaptureOutput *)captureOutput
   didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
          fromConnection:(AVCaptureConnection *)connection {
-  FrameCallbackBlock callback = [self.captureCallbacks objectForKey:connection];
+  // stopCaptureWithSignal: may remove the callback from another thread at any time, so read it
+  // under the lock and hold a reference for the duration of the call.
+  FrameCallbackBlock callback;
+  @synchronized(self) {
+    callback = [[self.captureCallbacks objectForKey:connection] retain];
+  }
 
   if (callback != nil) {
     if (!callback(sampleBuffer)) {
       @synchronized(self) {
-        [self.session stopRunning];
-        [self.captureCallbacks removeObjectForKey:connection];
-        [self.session removeOutput:[self.videoOutputs objectForKey:connection]];
-        [self.videoOutputs removeObjectForKey:connection];
-        dispatch_semaphore_signal([self.captureSignals objectForKey:connection]);
-        [self.captureSignals removeObjectForKey:connection];
-        [self.session startRunning];
+        [self stopCaptureForConnection:connection];
       }
     }
+    [callback release];
   }
 }
 

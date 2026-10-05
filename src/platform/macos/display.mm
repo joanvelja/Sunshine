@@ -6,6 +6,7 @@
 // standard includes
 #include <charconv>
 #include <chrono>
+#include <mutex>
 #include <optional>
 #include <string_view>
 
@@ -32,6 +33,11 @@ namespace platf {
   using namespace std::literals;
 
   namespace {
+    /**
+     * @brief How often capture() checks for an interrupt while no frames arrive.
+     */
+    constexpr int64_t capture_heartbeat_ns {500 * NSEC_PER_MSEC};
+
     std::optional<CGDirectDisplayID> parse_display_id(std::string_view display_name) {
       if (display_name.empty()) {
         return std::nullopt;
@@ -50,7 +56,9 @@ namespace platf {
 
     OSType videotoolbox_pixel_format(const video::config_t &config) {
       const auto colorspace {video::colorspace_from_client_config(config, false)};
-      return colorspace.bit_depth == 10 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+      // 8-bit: capture BGRA and let nv12_zero_device filter chroma with vImage, because
+      // AVFoundation's own 4:2:0 output decimates chroma (thin colored lines lose their color).
+      return colorspace.bit_depth == 10 ? kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange : kCVPixelFormatType_32BGRA;
     }
   }  // namespace
 
@@ -67,7 +75,23 @@ namespace platf {
     }
 
     capture_e capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) override {
+      // The frame callback runs on AVFoundation's queue while this thread sends heartbeats,
+      // and the pipeline callbacks must not be called concurrently. Once `stopped` is set,
+      // capture() may have returned and the callback references may dangle, so the frame
+      // callback must not touch them.
+      struct capture_state_t {
+        std::mutex mutex;
+        bool stopped {false};
+      };
+
+      auto state = std::make_shared<capture_state_t>();
+
       auto signal = [av_capture capture:^(CMSampleBufferRef sampleBuffer) {
+        std::lock_guard lock {state->mutex};
+        if (state->stopped) {
+          return false;
+        }
+
         auto new_sample_buffer = std::make_shared<av_sample_buf_t>(sampleBuffer);
         auto new_pixel_buffer = std::make_shared<av_pixel_buf_t>(new_sample_buffer->buf);
 
@@ -75,6 +99,7 @@ namespace platf {
         if (!pull_free_image_cb(img_out)) {
           // got interrupt signal
           // returning false here stops capture backend
+          state->stopped = true;
           return false;
         }
         auto av_img = std::static_pointer_cast<av_img_t>(img_out);
@@ -99,14 +124,35 @@ namespace platf {
         if (!push_captured_image_cb(std::move(img_out), true)) {
           // got interrupt signal
           // returning false here stops capture backend
+          state->stopped = true;
           return false;
         }
 
         return true;
       }];
 
-      // FIXME: We should time out if an image isn't returned for a while
-      dispatch_semaphore_wait(signal, DISPATCH_TIME_FOREVER);
+      if (signal == nil) {
+        BOOST_LOG(error) << "Unable to start AVFoundation screen capture"sv;
+        return capture_e::error;
+      }
+
+      // AVFoundation delivers no frames while the screen is static, so the frame callback alone
+      // can't notice an interrupt. Without this heartbeat, session teardown hangs until the screen
+      // changes, and stream.cpp aborts the process after 10 seconds.
+      while (dispatch_semaphore_wait(signal, dispatch_time(DISPATCH_TIME_NOW, capture_heartbeat_ns)) != 0) {
+        bool stop {false};
+        {
+          std::lock_guard lock {state->mutex};
+          if (!state->stopped && !push_captured_image_cb(nullptr, false)) {
+            state->stopped = stop = true;
+          }
+        }
+        // Outside the lock, so a frame callback blocked on it can finish (it sees `stopped` and
+        // returns without touching the pipeline callbacks).
+        if (stop) {
+          [av_capture stopCaptureWithSignal:signal];
+        }
+      }
 
       return capture_e::ok;
     }

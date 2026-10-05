@@ -478,6 +478,7 @@ namespace video {
       vps = std::move(other.vps);
 
       inject = other.inject;
+      idr_request = other.idr_request;
 
       return *this;
     }
@@ -532,6 +533,8 @@ namespace video {
     std::unique_ptr<platf::avcodec_encode_device_t> device;  ///< Platform device used by the FFmpeg hardware encoder.
 
     std::vector<packet_raw_t::replace_t> replacements;  ///< NAL-unit byte ranges that must be replaced before packet send.
+
+    idr_request_tracker_t idr_request;  ///< Outstanding IDR request, matched to encoder output by PTS.
 
     cbs::nal_t sps;  ///< Original and rewritten sequence parameter set for IDR injection.
     cbs::nal_t vps;  ///< Original and rewritten HEVC video parameter set for IDR injection.
@@ -1832,6 +1835,10 @@ namespace video {
     auto &sps = session.sps;
     auto &vps = session.vps;
 
+    if (frame->flags & AV_FRAME_FLAG_KEY) {
+      session.idr_request.requested(frame_nr);
+    }
+
     // send the frame to the encoder
     auto ret = avcodec_send_frame(ctx.get(), frame);
     if (ret < 0) {
@@ -1853,11 +1860,11 @@ namespace video {
       }
 
       if (av_packet->flags & AV_PKT_FLAG_KEY) {
-        BOOST_LOG(debug) << "Frame "sv << frame_nr << ": IDR Keyframe (AV_FRAME_FLAG_KEY)"sv;
+        BOOST_LOG(debug) << "Frame "sv << av_packet->pts << ": IDR Keyframe (AV_FRAME_FLAG_KEY)"sv;
       }
 
-      if ((frame->flags & AV_FRAME_FLAG_KEY) && !(av_packet->flags & AV_PKT_FLAG_KEY)) {
-        BOOST_LOG(error) << "Encoder did not produce IDR frame when requested!"sv;
+      if (av_packet->pts != AV_NOPTS_VALUE && session.idr_request.missed_idr(av_packet->pts, av_packet->flags & AV_PKT_FLAG_KEY)) {
+        BOOST_LOG(error) << "Encoder did not produce IDR frame when requested! (frame "sv << av_packet->pts << ')';
       }
 
       if (session.inject) {

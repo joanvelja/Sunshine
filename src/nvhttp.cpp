@@ -434,9 +434,14 @@ namespace nvhttp {
   /**
    * @brief Add authorized client data.
    *
+   * Moonlight keeps its client certificate when it pairs again, so re-pairing a known
+   * certificate updates its existing entry (and removes any duplicates of it) instead of
+   * appending another one. Duplicate identities fail closed in is_client_enabled(), so
+   * appending would lock the client out after every re-pair.
+   *
    * @param name Human-readable name to assign.
    * @param cert Certificate data or object used by the operation.
-   * @return Persistent UUID for the added client, or an empty string when the certificate is invalid.
+   * @return Persistent UUID for the paired client, or an empty string when the certificate is invalid.
    */
   std::string add_authorized_client(const std::string &name, std::string &&cert) {
     auto canonical_certificate = canonical_certificate_pem(cert);
@@ -444,19 +449,33 @@ namespace nvhttp {
       return {};
     }
 
-    named_cert_t named_cert;
-    named_cert.name = name;
-    named_cert.cert = std::move(canonical_certificate);
-    named_cert.uuid = uuid_util::uuid_t::generate().string();
-
     std::lock_guard lock {client_auth_mutex()};
-    client_root.named_devices.emplace_back(std::move(named_cert));
+    auto &devices = client_root.named_devices;
+    const auto same_cert = [&canonical_certificate](const named_cert_t &device) {
+      return device.cert == canonical_certificate;
+    };
+
+    std::string uuid;
+    if (auto existing = std::ranges::find_if(devices, same_cert); existing != devices.end()) {
+      // Pairing again required the PIN, so the client is authorized afresh.
+      existing->name = name;
+      existing->enabled = true;
+      uuid = existing->uuid;
+      devices.erase(std::remove_if(std::next(existing), devices.end(), same_cert), devices.end());
+    } else {
+      named_cert_t named_cert;
+      named_cert.name = name;
+      named_cert.cert = std::move(canonical_certificate);
+      named_cert.uuid = uuid_util::uuid_t::generate().string();
+      uuid = named_cert.uuid;
+      devices.emplace_back(std::move(named_cert));
+    }
     rebuild_client_cert_chain();
 
     if (!config::sunshine.flags[config::flag::FRESH_STATE]) {
       save_state();
     }
-    return client_root.named_devices.back().uuid;
+    return uuid;
   }
 
   /**
